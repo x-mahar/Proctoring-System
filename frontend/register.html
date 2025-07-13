@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Register</title>
+</head>
+<body>
+
+  <h2>Candidate Registration</h2>
+  <input type="text" id="nameInput" placeholder="Enter your name">
+  <button onclick="register()">Register</button>
+
+  <p id="status"></p>
+
+  <script>
+    function generateCandidateId(name) {
+      const timestamp = Date.now().toString().slice(-5);
+      const initials = name.split(" ").map(w => w[0]?.toUpperCase() || "").join("");
+      return `${initials}_${timestamp}`;
+    }
+
+    function register() {
+      const name = document.getElementById("nameInput").value.trim();
+      const status = document.getElementById("status");
+
+      if (!name) {
+        status.textContent = "Please enter your name";
+        return;
+      }
+
+      const candidateId = generateCandidateId(name);
+      localStorage.setItem("candidate_name", name);
+      localStorage.setItem("candidate_id", candidateId);
+
+      status.textContent = "Registered. Redirecting...";
+      setTimeout(() => {
+        window.location.href = "index.html";
+      }, 1000);
+    }
+  </script>
+
+</body>
+</html>

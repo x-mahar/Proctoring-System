@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Proctoring System</title>
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; }
+    video { border: 2px solid #333; margin-top: 10px; }
+    #cheatingAlert { font-weight: bold; margin-top: 10px; color: red; }
+    button { margin: 4px; padding: 8px 12px; }
+    #liveTranscript { font-style: italic; color: #333; margin-top: 4px; }
+  </style>
+</head>
+<body>
+
+  <div id="popupModal" style="display:none; position:fixed; top:30%; left:50%; transform:translate(-50%, -50%);
+  background:#1e1e1e; padding:20px; border-radius:10px; color:white; z-index:1000;">
+    <p id="popupMessage"></p>
+    <button onclick="closePopup()">OK</button>
+  </div>
+
+
+  <h3>Candidate Info</h3>
+  <p id="candidateIdDisplay"></p>
+  <button onclick="confirmClearRegistration()" style="margin-top: 10px; padding: 8px 14px; background-color: crimson; color: white; border: none; border-radius: 5px;">
+  🗑️ Clear Registration
+  </button>
+
+  <!-- Screen Share Recording -->
+  <h2>Screen Sharing</h2>
+  <button onclick="startScreenRecording()">🗅️ Start Screen Share & Record</button>
+  <button onclick="stopScreenRecording()">⏹️ Stop Recording</button>
+
+  <!-- Webcam Monitoring -->
+  <h2>Webcam Monitoring</h2>
+  <div style="position: relative; width: 480px; height: 360px;">
+    <video id="webcam" autoplay playsinline width="480" height="360" style="position: absolute; top: 0; left: 0;"></video>
+    <canvas id="landmarkCanvas" width="480" height="360" style="position: absolute; top: 0; left: 0; z-index: 10;"></canvas>
+  </div>
+  <p id="poseData">Pose data will appear here...</p>
+  <p id="cheatingAlert">Cheating status will appear here...</p>
+
+  <!-- Voice-Based QA -->
+  <h2>Voice-Based Question Section</h2>
+  <div id="questionBox">Loading question...</div>
+  <button onclick="recordAnswer()" id="answerBtn">🎤 Answer</button>
+
+  <div style="margin-top: 8px;">
+    <button onclick="submitAnswer()" id="submitBtn" style="display: none;">📤 Submit Answer</button>
+    <button onclick="respeakAnswer()" id="respeakBtn" style="display: none;">🔁 Re-speak</button>
+  </div>
+
+  <button onclick="markForReview()">📝 Mark for Review</button>
+  <button onclick="skipQuestion()">⏭️ Skip</button>
+  <button onclick="nextQuestion()">➡️ Next</button>
+  <button onclick="finishTest()" id="finishTestBtn">✅ Finish Test</button>
+
+  <p><strong>Transcribed Answer:</strong></p>
+  <p id="liveTranscript">...</p>
+  <p id="answerStatus"></p>
+
+  <!-- Main Script -->
+  <script>
+    let uploadInterval = null;
+    let videoStream = null;
+    let candidateId = "";
+    let candidateName = "";
+    let currentQuestionIndex = 0;
+    let mediaRecorder, audioChunks = [], lastAudioBlob = null;
+    let testPaused = false;
+    let pauseTimer = null;
+    let frameInterval = null;
+    let tabViolationCount = 0;
+    let disqualificationTriggered = false;
+    let blockTabDetection = false;
+    let blockTimeout = null;
+    let cheatingPopupShown = false;
+
+
+    const questions = [
+      { id: 1, question: "What is artificial intelligence?", expected: "Artificial intelligence is the simulation of human intelligence by machines" },
+      { id: 2, question: "What is machine learning?", expected: "Machine learning is a subset of AI that enables systems to learn from data" },
+      { id: 3, question: "Define overfitting", expected: "Overfitting is when a model performs well on training data but poorly on unseen data" },
+      { id: 4, question: "What is a neural network?", expected: "A neural network is a computational model inspired by the human brain" },
+      { id: 5, question: "What is precision in ML?", expected: "Precision is the number of true positives divided by the number of predicted positives" }
+    ];
+
+    function displayQuestion() {
+      const q = questions[currentQuestionIndex];
+      document.getElementById("questionBox").innerText = `Q${q.id}: ${q.question}`;
+    }
+
+    window.addEventListener("DOMContentLoaded", async () => {
+      candidateName = localStorage.getItem("candidate_name");
+      candidateId = localStorage.getItem("candidate_id");
+
+      if (!candidateName || !candidateId) {
+        alert("❌ No candidate info found. Please register first.");
+        window.location.href = "register.html";
+        return;
+      }
+
+      document.getElementById("candidateIdDisplay").innerText =
+        `Welcome ${candidateName} (ID: ${candidateId})`;
+
+      // ✅ Check if already completed
+      const checkForm = new URLSearchParams();
+      checkForm.append("candidate_id", candidateId);
+
+      const res = await fetch("http://127.0.0.1:8000/api/v1/questions/check_status", {
+        method: "POST",
+        body: checkForm
+      });
+
+      const result = await res.json();  // ✅ Parse the response here
+
+      const landmarkCanvas = document.getElementById("landmarkCanvas");
+      const ctx = landmarkCanvas.getContext("2d");
+      ctx.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height);
+
+      if (result.all_landmarks && result.all_landmarks.length > 0) {
+        ctx.fillStyle = "lime";
+        result.all_landmarks.forEach(pt => {
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 1.5, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+      }
+
+
+      if (result.banned) {
+        alert("🚫 You are disqualified from taking the test.");
+        window.location.href = "register.html";
+        return;
+      }
+
+
+      displayQuestion();
+      startFrameStreaming();
+    });
+
+
+
+    async function startFrameStreaming() {
+      try {
+        console.log("🔄 Trying to access webcam...");
+
+        const webcam = document.getElementById("webcam");
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+
+        console.log("✅ Webcam stream acquired");
+        webcam.srcObject = stream;
+
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+
+        frameInterval = setInterval(async () => {
+          if (testPaused) return;
+
+          canvas.width = webcam.videoWidth;
+          canvas.height = webcam.videoHeight;
+          context.drawImage(webcam, 0, 0, canvas.width, canvas.height);
+          const dataUrl = canvas.toDataURL("image/jpeg");
+
+          const res = await fetch("http://127.0.0.1:8000/api/v1/frames/", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ candidate_id: candidateId, image: dataUrl })
+          });
+
+          const result = await res.json();
+
+          if (result.status === "force_failed") {
+            alert(result.message || "🚫 Test failed due to repeated cheating.");
+            localStorage.removeItem("candidate_name");
+            localStorage.removeItem("candidate_id");
+            window.location.href = "register.html";
+            return;
+          }
+          if (result.status === "banned") {
+            alert(result.message || "❌ You are disqualified from the test.");
+            setTimeout(() => {
+              localStorage.removeItem("candidate_name");
+              localStorage.removeItem("candidate_id");
+              window.location.href = "register.html";
+            }, 5000);
+
+            return;
+          }
+
+
+          if (result.status === "paused") {
+            testPaused = true;
+            document.getElementById("cheatingAlert").innerText = `⏸️ ${result.message}`;
+            document.getElementById("poseData").innerText = `Paused for ${result.remaining_seconds} seconds...`;
+
+            document.getElementById("answerBtn").disabled = true;
+            document.getElementById("submitBtn").disabled = true;
+            document.getElementById("respeakBtn").disabled = true;
+
+            let secondsLeft = result.remaining_seconds;
+            pauseTimer = setInterval(() => {
+              secondsLeft--;
+              document.getElementById("poseData").innerText = `⏸️ Resuming in ${secondsLeft}s...`;
+              if (secondsLeft <= 0) {
+                clearInterval(pauseTimer);
+                testPaused = false;
+                document.getElementById("cheatingAlert").innerText = "✅ Resumed";
+                document.getElementById("poseData").innerText = "Monitoring resumed";
+
+                document.getElementById("answerBtn").disabled = false;
+                document.getElementById("submitBtn").disabled = false;
+                document.getElementById("respeakBtn").disabled = false;
+                document.getElementById("submitBtn").style.display = "inline-block";
+                document.getElementById("respeakBtn").style.display = "inline-block";
+              }
+            }, 1000);
+            return;
+          }
+
+          document.getElementById("poseData").innerText =
+            `Yaw: ${result.yaw?.toFixed(1)}°, Pitch: ${result.pitch?.toFixed(1)}°, Roll: ${result.roll?.toFixed(1)}°`;
+
+          if (result.cheating) {
+            document.getElementById("cheatingAlert").innerText = `🚨 ${result.reason} (${result.warning || ""})`;
+          } else if (result.warning) {
+            document.getElementById("cheatingAlert").innerText = `⚠️ ${result.warning}`;
+          } else {
+            document.getElementById("cheatingAlert").innerText = "✅ Normal";
+          }
+
+        }, 700);
+
+      } catch (err) {
+        alert("⚠️ Webcam access denied or unavailable.");
+      }
+    }
+
+    //Screen recording
+    let screenStream, screenRecorder, screenChunks = [];
+
+    async function startScreenRecording() {
+      try {
+        temporarilyDisableTabDetection(5000);
+
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenChunks = [];
+        screenRecorder = new MediaRecorder(screenStream);
+
+        screenRecorder.ondataavailable = e => {
+          if (e.data.size > 0) screenChunks.push(e.data);
+        };
+
+        screenRecorder.onstop = async () => {
+          const blob = new Blob(screenChunks, { type: 'video/webm' });
+          const url = URL.createObjectURL(blob);
+
+          // Download locally
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'screen_recording.webm';
+          a.click();
+
+          // Optional: Upload to server
+          /*
+          const formData = new FormData();
+          formData.append('candidate_id', candidateId);
+          formData.append('recording', blob, 'screen_recording.webm');
+          await fetch('http://127.0.0.1:8000/api/v1/frames/upload_screen_recording', {
+            method: 'POST',
+            body: formData
+          });
+          */
+        };
+
+        // Detect screen share stop
+        screenStream.getVideoTracks()[0].addEventListener("ended", () => {
+          alert("⚠️ Screen sharing has been stopped!");
+        });
+
+        screenRecorder.start();
+        console.log("📽️ Screen recording started");
+      } catch (err) {
+        console.error("Screen share failed:", err);
+        alert("⚠️ Screen share permission denied.");
+      }
+    }
+
+    async function recordAnswer() {
+      temporarilyDisableTabDetection(5000);
+      try {
+        audioChunks = [];
+        document.getElementById("answerStatus").innerText = "🎤 Recording...";
+        document.getElementById("liveTranscript").innerText = "...";
+        document.getElementById("respeakBtn").style.display = "none";
+        document.getElementById("respeakBtn").disabled = false;
+        document.getElementById("submitBtn").style.display = "none";
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+
+        mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+
+        mediaRecorder.onstop = async () => {
+          lastAudioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+
+          const formData = new FormData();
+          formData.append("candidate_id", candidateId);
+          formData.append("question_id", questions[currentQuestionIndex].id);
+          formData.append("expected_answer", questions[currentQuestionIndex].expected);
+          formData.append("audio_file", lastAudioBlob, "answer.webm");
+
+          try {
+            const res = await fetch("http://127.0.0.1:8000/api/v1/questions/stt_only", {
+              method: "POST",
+              body: formData
+            });
+
+            const result = await res.json();
+
+            if (res.ok && result.user_answer) {
+              document.getElementById("liveTranscript").innerText = result.user_answer;
+              document.getElementById("answerStatus").innerText = "📝 Please review and click Submit";
+              document.getElementById("respeakBtn").style.display = "inline-block";
+              document.getElementById("submitBtn").style.display = "inline-block";
+            } else {
+              document.getElementById("answerStatus").innerText = `❌ STT Error: ${result.error || "Try again"}`;
+            }
+          } catch (err) {
+            console.error("STT request failed:", err);
+            document.getElementById("answerStatus").innerText = "❌ STT request failed.";
+          }
+        };
+
+        mediaRecorder.start();
+        setTimeout(() => mediaRecorder.stop(), 5000);
+
+      } catch (err) {
+        alert("🎤 Microphone access denied or unavailable.");
+        console.error("Microphone access error:", err);
+      }
+    }
+
+
+
+
+    async function submitAnswer() {
+      console.log("Submitting answer...");
+      console.log("lastAudioBlob", lastAudioBlob);
+      console.log("candidateId:", candidateId);
+
+      if (testPaused) return alert("⏸️ Test is paused. Wait to resume.");
+      if (!lastAudioBlob || !candidateId){
+       console.error("❌ lastAudioBlob or candidateId missing");
+       return;
+      }
+
+      const formData = new FormData();
+      formData.append('candidate_id', candidateId);
+      formData.append('question_id', questions[currentQuestionIndex].id);
+      formData.append('expected_answer', questions[currentQuestionIndex].expected);
+      formData.append('audio_file', lastAudioBlob, 'answer.wav');
+
+
+      const res = await fetch('http://127.0.0.1:8000/api/v1/questions/submit_answer', {
+        method: 'POST',
+        body: formData
+      });
+
+      const result = await res.json();
+      if (res.ok) {
+        document.getElementById("answerStatus").innerText =
+          result.is_correct ? `✅ Correct answer` : `❌ Incorrect answer`;
+      } else {
+        document.getElementById("answerStatus").innerText = `❌ Error: ${result.error || "Try again"}`;
+      }
+
+      document.getElementById("submitBtn").style.display = "none";
+      document.getElementById("respeakBtn").style.display = "none";
+      document.getElementById("respeakBtn").disabled = true; // 👈 This prevents future clicks
+
+    }
+
+    function respeakAnswer() {
+      recordAnswer();
+    }
+
+    function skipQuestion() {
+      temporarilyDisableTabDetection(5000);
+
+      fetch("http://127.0.0.1:8000/api/v1/questions/skip_question", {
+        method: "POST",
+        body: new URLSearchParams({
+          candidate_id: candidateId,
+          question_id: questions[currentQuestionIndex].id
+        })
+      });
+      nextQuestion();
+    }
+
+    function markForReview() {
+      temporarilyDisableTabDetection(5000);
+
+      fetch("http://127.0.0.1:8000/api/v1/questions/mark_review", {
+        method: "POST",
+        body: new URLSearchParams({
+          candidate_id: candidateId,
+          question_id: questions[currentQuestionIndex].id
+        })
+      });
+      alert(`Question ${questions[currentQuestionIndex].id} marked for review`);
+    }
+
+    function nextQuestion() {
+      currentQuestionIndex++;
+      if (currentQuestionIndex >= questions.length) {
+        alert("You have reached the end. Click Finish Test.");
+        currentQuestionIndex = questions.length - 1;
+      } else {
+        displayQuestion();
+
+        // ✅ Clear transcript, status, and buttons for next question
+        document.getElementById("liveTranscript").innerText = "...";
+        document.getElementById("answerStatus").innerText = "";
+        document.getElementById("submitBtn").style.display = "none";
+        document.getElementById("respeakBtn").style.display = "none";
+
+        // ✅ Reset last audio blob
+        lastAudioBlob = null;
+      }
+    }
+
+
+    async function finishTest() {
+      temporarilyDisableTabDetection(5000);
+
+      const formData = new FormData();
+      formData.append("candidate_id", candidateId);
+      formData.append("candidate_name", candidateName);
+
+      try {
+        const res = await fetch("http://127.0.0.1:8000/api/v1/questions/get_result", {
+          method: "POST",
+          body: formData
+        });
+
+        const contentType = res.headers.get("content-type") || "";
+        let result = {};
+
+        if (contentType.includes("application/json")) {
+          result = await res.json();
+        } else {
+          const text = await res.text();
+          console.error("Server returned non-JSON:", text);
+          alert("❌ Server error: Unexpected response format.");
+          return;
+        }
+
+        if (res.ok) {
+          document.getElementById("finishTestBtn").disabled = true;
+
+          const summary = `🎓 Name: ${result.candidate_name}
+    📋 Score: ${result.score}/${result.total_questions}
+    📈 Percentage: ${result.percentage.toFixed(2)}%
+    ✅ Result: ${result.result}`;
+
+          alert(summary);
+
+          if (frameInterval) {
+            clearInterval(frameInterval);
+            frameInterval = null;
+          }
+
+          // Stop webcam
+          const webcam = document.getElementById("webcam");
+          if (webcam.srcObject) {
+            webcam.srcObject.getTracks().forEach(track => track.stop());
+            webcam.srcObject = null;
+          }
+
+          // Hide interface
+          document.getElementById("questionBox").innerText = "";
+          document.getElementById("poseData").innerText = "";
+          document.getElementById("cheatingAlert").innerText = "";
+          webcam.style.display = "none";
+
+          localStorage.removeItem("candidate_name");
+          localStorage.removeItem("candidate_id");
+
+          setTimeout(() => {
+            window.location.href = "register.html";
+          }, 2000);
+
+        } else {
+          console.error("Backend error:", result.detail || result);
+          alert("❌ Failed to fetch test result.");
+        }
+
+      } catch (err) {
+        console.error("Fetch failed:", err);
+        alert("❌ Server error while fetching result.");
+      }
+    }
+
+    // ✅ Move these OUTSIDE of finishTest()
+
+    function confirmClearRegistration() {
+      temporarilyDisableTabDetection(5000);
+
+      const confirmClear = confirm("⚠️ Are you sure you want to clear registration and start over?");
+      if (confirmClear) {
+        localStorage.removeItem("candidate_name");
+        localStorage.removeItem("candidate_id");
+        alert("✅ Registration data cleared.");
+        window.location.href = "register.html";
+      }
+    }
+
+    function showPopup(message) {
+      document.getElementById("popupMessage").innerText = message;
+      document.getElementById("popupModal").style.display = "block";
+    }
+
+    function closePopup() {
+      document.getElementById("popupModal").style.display = "none";
+    }
+
+    function handleTabViolation(reason) {
+      tabViolationCount++;
+
+      if (!cheatingPopupShown) {
+        cheatingPopupShown = true;
+        showPopup(`🚨 Cheating detected: ${reason}`);
+        setTimeout(() => cheatingPopupShown = false, 10000);
+      }
+
+      document.getElementById("cheatingAlert").innerText = `🚨 ${reason}`;
+
+      fetch("http://127.0.0.1:8000/api/v1/frames/log_tab_violation", {
+        method: "POST",
+        body: new URLSearchParams({
+          candidate_id: candidateId,
+          reason: reason,
+          timestamp: new Date().toISOString()
+        })
+      });
+
+      if (tabViolationCount >= 3 && !disqualificationTriggered) {
+        disqualificationTriggered = true;
+
+        // 🛑 STOP frame streaming
+        if (frameInterval) {
+          clearInterval(frameInterval);
+          frameInterval = null;
+        }
+
+        // 🛑 STOP webcam stream
+        const webcam = document.getElementById("webcam");
+        if (webcam.srcObject) {
+          webcam.srcObject.getTracks().forEach(track => track.stop());
+          webcam.srcObject = null;
+        }
+
+        // ⛔️ Final disqualification popup and redirect
+        setTimeout(() => {
+          showPopup("❌ You are disqualified. Test will end now.");
+
+          setTimeout(() => {
+            // Try finishTest, but also ensure redirect even if it fails
+            finishTest();
+
+            // Fallback: Force redirect after 5 seconds regardless
+            setTimeout(() => {
+              localStorage.removeItem("candidate_name");
+              localStorage.removeItem("candidate_id");
+              window.location.href = "register.html";
+            }, 5000);
+
+          }, 3000);
+        }, 2000);
+
+      }
+    }
+
+
+    // Tab switch or blur detection
+    document.addEventListener("visibilitychange", () => {
+      if (blockTabDetection) return;
+
+      if (document.visibilityState === "hidden" || document.hidden) {
+        handleTabViolation("Tab switched or minimized");
+      }
+    });
+
+    window.addEventListener("blur", () => {
+      if (blockTabDetection) return;
+      handleTabViolation("Window unfocused or minimized");
+    });
+
+    // Disable tab detection temporarily
+    function temporarilyDisableTabDetection(ms = 5000) {
+      console.log("🚫 Tab detection disabled");
+      blockTabDetection = true;
+      clearTimeout(blockTimeout);
+      blockTimeout = setTimeout(() => {
+        console.log("✅ Tab detection re-enabled");
+        blockTabDetection = false;
+      }, ms);
+    }
+
+
+  </script>
+</body>
+</html>
