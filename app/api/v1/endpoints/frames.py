@@ -363,5 +363,3 @@ async def log_tab_violation(candidate_id: str = Form(...), reason: str = Form(..
     except Exception as e:
         logger.error(f"Tab violation logging failed: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error") from e
-
-
