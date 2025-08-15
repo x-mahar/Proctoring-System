@@ -1,0 +1,79 @@
+/* Make background cover the entire screen */
+html, body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: linear-gradient(-45deg, #1a1a40, #3b0a45, #6d0c6b, #b5179e);
+  background-size: 300% 300%;
+  animation: gradientShift 12s ease infinite;
+  font-family: Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* Full-screen container */
+.proctoring-container {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  padding: 20px;
+  background: rgba(255, 255, 255, 0.05); /* Slight transparent layer for depth */
+}
+
+/* Grid Layout */
+.proctoring-layout {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 20px;
+}
+
+/* Left & Right panels */
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.right-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+/* Cards */
+.card {
+  background: linear-gradient(145deg, #f0ede6, #e1ddd5); /* Soft earthy tones */
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  transition: transform 0.2s ease-in-out, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.15);
+}
+
+/* Buttons */
+button {
+  background: linear-gradient(135deg, #867b6f, #5c5349); /* Muted brown tones */
+  color: white;
+  border: none;
+  padding: 12px 20px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: bold;
+  transition: background 0.3s ease, transform 0.2s ease;
+}
+
+button:hover {
+  background: linear-gradient(135deg, #5c5349, #3b352f);
+  transform: scale(1.05);
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .proctoring-layout {
+    grid-template-columns: 1fr;
+  }
+}
