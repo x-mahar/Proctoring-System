@@ -54,9 +54,6 @@ procting_app/
 ├── requirements.txt
 └── README.md
 
-yaml
-Copy
-Edit
 
 ---
 
