@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Register</title>
+</head>
+<body style="margin:0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, 'Helvetica Neue', sans-serif; background: linear-gradient(135deg, #0f172a 0%, #1f2937 100%); color:#e5e7eb;">
+
+  <div style="min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;">
+    <div style="width:100%; max-width:420px; background: rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:28px; box-shadow: 0 20px 40px rgba(0,0,0,0.35); backdrop-filter: blur(6px);">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:16px;">
+        <div style="width:32px; height:32px; border-radius:8px; background: linear-gradient(135deg,#3b82f6,#22d3ee);"></div>
+        <h2 style="margin:0; font-size:20px; font-weight:700; color:#fff;">Candidate Registration</h2>
+      </div>
+
+      <p style="margin:0 0 16px; color:#cbd5e1; font-size:14px;">Enter your full name to generate a unique candidate ID and proceed to the test.</p>
+
+      <label for="nameInput" style="display:block; font-size:13px; color:#cbd5e1; margin-bottom:6px;">Full Name</label>
+      <input type="text" id="nameInput" placeholder="Enter your name" 
+             style="width:100%; padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.2); color:#fff; outline:none; transition: border 0.2s;" />
+
+      <button onclick="register()" 
+              style="margin-top:12px; width:100%; padding:10px 14px; background: linear-gradient(135deg,#3b82f6,#06b6d4); color:#fff; border:none; border-radius:10px; font-weight:600; cursor:pointer;">Register</button>
+
+      <p id="status" style="margin-top:12px; color:#94a3b8; font-size:14px;"></p>
+    </div>
+  </div>
+
+  <script>
+    function generateCandidateId(name) {
+      const timestamp = Date.now().toString().slice(-5);
+      const initials = name.split(" ").map(w => w[0]?.toUpperCase() || "").join("");
+      return `${initials}_${timestamp}`;
+    }
+
+    function register() {
+      const name = document.getElementById("nameInput").value.trim();
+      const status = document.getElementById("status");
+
+      if (!name) {
+        status.textContent = "Please enter your name";
+        return;
+      }
+
+      const candidateId = generateCandidateId(name);
+      localStorage.setItem("candidate_name", name);
+      localStorage.setItem("candidate_id", candidateId);
+
+      status.textContent = "Registered. Redirecting...";
+      setTimeout(() => {
+        window.location.href = "index.html";
+      }, 1000);
+    }
+  </script>
+
+</body>
+</html>
