@@ -7,10 +7,16 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
   const [hasAnswered, setHasAnswered] = useState(false);
+  const [transcriptPreview, setTranscriptPreview] = useState(null);
+  const [isPreviewMode, setIsPreviewMode] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [currentAudioBlob, setCurrentAudioBlob] = useState(null);
 
+  // Handle audio blob - get transcript but don't submit yet
   useEffect(() => {
-    if (audioBlob) {
-      submitAnswer();
+    if (audioBlob && !isPreviewMode) {
+      setCurrentAudioBlob(audioBlob);
+      getTranscript(audioBlob);
     }
   }, [audioBlob]);
 
@@ -18,15 +24,93 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
   useEffect(() => {
     setError("");
     setHasAnswered(false);
+    setTranscriptPreview(null);
+    setIsPreviewMode(false);
+    setCurrentAudioBlob(null);
   }, [question?.id]);
 
   async function handleAnswerClick() {
     if (isRecording) {
       stopRecording();
     } else {
+      setError("");
+      setTranscriptPreview(null);
+      setIsPreviewMode(false);
       startRecording();
     }
   }
+
+  async function getTranscript(blob) {
+    setIsTranscribing(true);
+    try {
+      const formData = new FormData();
+      // Create a proper audio file for the backend
+      const audioFile = new File([blob], `preview_${Date.now()}.webm`, {
+        type: 'audio/webm;codecs=opus'
+      });
+      formData.append("audio", audioFile);
+
+      const res = await fetch(`${API_BASE}/questions/stt_only`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        let errorData;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { detail: errorText };
+        }
+        throw new Error(errorData.detail || errorData.message || `Server error: ${res.status}`);
+      }
+
+      const data = await res.json();
+
+      // Handle both 'transcript' and 'user_answer' response formats
+      const transcript = data.transcript || data.user_answer || "";
+
+      if (!transcript || transcript.trim().length === 0) {
+        setError("No speech detected. Please try recording again.");
+        setCurrentAudioBlob(null);
+        return;
+      }
+
+      setTranscriptPreview(transcript);
+      setIsPreviewMode(true);
+    } catch (err) {
+      console.error('Transcription error:', err);
+      setError("Failed to transcribe audio. Please try recording again.");
+      setCurrentAudioBlob(null);
+    } finally {
+      setIsTranscribing(false);
+    }
+  }
+
+  const handleConfirmSubmit = async () => {
+    if (!currentAudioBlob || !transcriptPreview) {
+      setError("No audio or transcript available to submit.");
+      return;
+    }
+
+    try {
+      await submitAnswer(currentAudioBlob);
+      setIsPreviewMode(false);
+      setTranscriptPreview(null);
+      setCurrentAudioBlob(null);
+    } catch (err) {
+      // Error is already handled in submitAnswer
+      console.error('Submit error:', err);
+    }
+  };
+
+  const handleReRecord = () => {
+    setIsPreviewMode(false);
+    setTranscriptPreview(null);
+    setCurrentAudioBlob(null);
+    setError("");
+  };
 
   async function handleMarkForReview() {
     try {
@@ -112,18 +196,18 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
     }
   }
 
-  async function submitAnswer() {
+  async function submitAnswer(audioBlob) {
     if (!audioBlob) return;
     setIsSubmitting(true);
     setError("");
-    
+
     try {
       const formData = new FormData();
       formData.append("candidate_id", candidateId);
       formData.append("question_id", question.id);
       formData.append("expected_answer", question.expected_answer || question.answer);
       if (sessionId) formData.append("session_id", sessionId);
-      
+
       // Validate audio blob before proceeding
       if (!audioBlob) {
         console.error('No audio blob available');
@@ -132,19 +216,19 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       }
 
       console.log('Audio blob size:', audioBlob.size, 'bytes');
-      
+
       if (audioBlob.size === 0) {
         console.error('Empty audio blob');
         setError('The recorded audio is empty. Please try again.');
         return;
       }
-      
+
       // Create a file with proper name and type
       const audioFile = new File([audioBlob], `recording_${candidateId}_q${question.id}.webm`, {
         type: 'audio/webm;codecs=opus'
       });
       formData.append("audio_file", audioFile);
-      
+
       // Log form data for debugging
       for (let [key, value] of formData.entries()) {
         console.log(`${key}:`, key === 'audio_file' ? `File(${value.size} bytes, ${value.type})` : value);
@@ -159,7 +243,7 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       console.log('Response status:', response.status);
       const responseText = await response.text();
       console.log('Response text:', responseText);
-      
+
       let responseData;
       try {
         responseData = responseText ? JSON.parse(responseText) : {};
@@ -172,11 +256,11 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         console.error('Server error:', responseData);
         throw new Error(responseData.detail || responseData.message || responseData.error || `Server error: ${response.status}`);
       }
-      
+
       // Success: consider answered on any 200 response so Mark for Review is enabled
       setHasAnswered(true);
       return responseData;
-      
+
     } catch (err) {
       console.error('Error in submitAnswer:', {
         error: err,
@@ -261,6 +345,31 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
     question: { textAlign: 'left', fontSize: 18, lineHeight: 1.6 },
     qnum: { marginRight: 8, color: 'rgba(255,255,255,0.6)' },
     qtext: { color: 'rgba(255,255,255,0.92)' },
+    preview: {
+      background: 'rgba(59,130,246,0.1)',
+      border: '1px solid rgba(96,165,250,0.3)',
+      borderRadius: 12,
+      padding: 16,
+      marginTop: 16
+    },
+    previewTitle: {
+      fontSize: 14,
+      fontWeight: 700,
+      color: 'rgb(191,219,254)',
+      marginBottom: 8
+    },
+    previewText: {
+      fontSize: 16,
+      lineHeight: 1.5,
+      color: 'rgba(255,255,255,0.9)',
+      fontStyle: 'italic',
+      marginBottom: 16
+    },
+    previewActions: {
+      display: 'flex',
+      gap: 12,
+      justifyContent: 'flex-end'
+    },
     error: { color: 'rgb(252,165,165)', background: 'rgba(239,68,68,0.12)', border: '1px solid rgba(248,113,113,0.35)', borderRadius: 10, padding: '8px 12px', marginTop: 12 },
     actions: { display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 12, marginTop: 6, marginBottom: 16 },
     btnAnswer: (active) => ({
@@ -270,6 +379,14 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         ? 'linear-gradient(135deg, #ef4444, #dc2626)'
         : 'linear-gradient(135deg, #22c55e, #16a34a)'
     }),
+    btnConfirm: {
+      ...btnBase,
+      background: 'linear-gradient(135deg, #22c55e, #16a34a)'
+    },
+    btnReRecord: {
+      ...btnBase,
+      background: 'linear-gradient(135deg, #f59e0b, #d97706)'
+    },
     btnSkip: {
       ...btnBase,
       background: 'linear-gradient(135deg, #f59e0b, #d97706)'
@@ -286,6 +403,16 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
     smSpinner: { height: 16, width: 16, border: '2px solid rgba(255,255,255,0.6)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }
   };
 
+  // Determine current status for badge
+  const getStatusBadge = () => {
+    if (isRecording) return { text: "Recording...", active: true };
+    if (isTranscribing) return { text: "Transcribing...", active: true };
+    if (isPreviewMode) return { text: "Review", active: false };
+    return { text: "Ready", active: false };
+  };
+
+  const statusBadge = getStatusBadge();
+
   return (
     <div style={styles.rootWrap}>
       <div style={styles.glow} />
@@ -293,11 +420,11 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         <div style={styles.header}>
           <div style={styles.badges}>
             <span style={styles.badge}>Voice Question</span>
-            <span style={styles.badgeState(isRecording)}>{isRecording ? "Recording..." : "Ready"}</span>
-            {isSubmitting && (
+            <span style={styles.badgeState(statusBadge.active)}>{statusBadge.text}</span>
+            {(isSubmitting || isTranscribing) && (
               <span style={styles.badgeInfo}>
                 <span style={styles.tinySpinner} />
-                Submitting
+                {isTranscribing ? 'Transcribing' : 'Submitting'}
               </span>
             )}
           </div>
@@ -311,6 +438,37 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
             <span style={styles.qnum}>Q{question.id}:</span>
             <span style={styles.qtext}>{question.question}</span>
           </p>
+
+          {/* Transcript Preview */}
+          {isPreviewMode && transcriptPreview && (
+            <div style={styles.preview}>
+              <div style={styles.previewTitle}>Your Answer Preview:</div>
+              <div style={styles.previewText}>"{transcriptPreview}"</div>
+              <div style={styles.previewActions}>
+                <button
+                  onClick={handleReRecord}
+                  disabled={isSubmitting}
+                  style={styles.btnReRecord}
+                >
+                  🔄 Re-record
+                </button>
+                <button
+                  onClick={handleConfirmSubmit}
+                  disabled={isSubmitting}
+                  style={styles.btnConfirm}
+                >
+                  {isSubmitting ? (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <span style={styles.smSpinner}></span>
+                      Submitting...
+                    </span>
+                  ) : (
+                    '✅ Confirm & Submit'
+                  )}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {error && <p style={styles.error}>{error}</p>}
@@ -318,28 +476,32 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         <div style={styles.rule} />
 
         <div style={styles.actions}>
-          <button
-            onClick={handleAnswerClick}
-            disabled={isSubmitting}
-            style={styles.btnAnswer(isRecording)}
-          >
-            {isSubmitting ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                <span style={styles.smSpinner}></span>
-                Submitting...
-              </span>
-            ) : (
-              isRecording ? "⏹️ Stop" : "🎤 Answer"
-            )}
-          </button>
-          <button
-            onClick={handleSkip}
-            disabled={isSubmitting}
-            style={styles.btnSkip}
-            title="Skip this question"
-          >
-            ⏭️ Skip
-          </button>
+          {!isPreviewMode && (
+            <>
+              <button
+                onClick={handleAnswerClick}
+                disabled={isSubmitting || isTranscribing}
+                style={styles.btnAnswer(isRecording)}
+              >
+                {isTranscribing ? (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <span style={styles.smSpinner}></span>
+                    Transcribing...
+                  </span>
+                ) : (
+                  isRecording ? "⏹️ Stop" : "🎤 Answer"
+                )}
+              </button>
+              <button
+                onClick={handleSkip}
+                disabled={isSubmitting || isTranscribing}
+                style={styles.btnSkip}
+                title="Skip this question"
+              >
+                ⏭️ Skip
+              </button>
+            </>
+          )}
           <button
             onClick={handleMarkForReview}
             disabled={!hasAnswered || isSubmitting}
