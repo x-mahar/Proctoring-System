@@ -44,7 +44,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
     setIsTranscribing(true);
     try {
       const formData = new FormData();
-      // Create a proper audio file for the backend
       const audioFile = new File([blob], `preview_${Date.now()}.webm`, {
         type: 'audio/webm;codecs=opus'
       });
@@ -67,8 +66,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       }
 
       const data = await res.json();
-
-      // Handle both 'transcript' and 'user_answer' response formats
       const transcript = data.transcript || data.user_answer || "";
 
       if (!transcript || transcript.trim().length === 0) {
@@ -100,7 +97,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       setTranscriptPreview(null);
       setCurrentAudioBlob(null);
     } catch (err) {
-      // Error is already handled in submitAnswer
       console.error('Submit error:', err);
     }
   };
@@ -123,13 +119,12 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         return;
       }
 
-      // Use application/x-www-form-urlencoded as per API docs
       const params = new URLSearchParams();
       params.append("candidate_id", String(candidateId));
       params.append("question_id", String(Number(question.id)));
       if (sessionId) params.append("session_id", String(sessionId));
 
-      console.log('mark_review payload (urlencoded):', params.toString());
+      console.log('mark_review payload:', params.toString());
       const res = await fetch(`${API_BASE}/questions/mark_review`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -139,26 +134,8 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       const contentType = res.headers.get('content-type') || '';
       const payload = contentType.includes('application/json') ? await res.json() : await res.text();
       if (!res.ok) {
-        console.warn('mark_review urlencoded failed:', payload);
-        if (res.status === 400) {
-          // Fallback: try multipart/form-data
-          const form = new FormData();
-          form.append('candidate_id', String(candidateId));
-          form.append('question_id', String(Number(question.id)));
-          if (sessionId) form.append('session_id', String(sessionId));
-          console.log('mark_review payload (multipart): candidate_id, question_id');
-          const res2 = await fetch(`${API_BASE}/questions/mark_review`, { method: 'POST', body: form });
-          const ct2 = res2.headers.get('content-type') || '';
-          const payload2 = ct2.includes('application/json') ? await res2.json() : await res2.text();
-          if (!res2.ok) {
-            const msg2 = (payload2 && (payload2.detail || payload2.message || payload2.error)) || `Failed to mark for review (${res2.status})`;
-            throw new Error(msg2);
-          }
-          return; // success on fallback
-        } else {
-          const msg = (payload && (payload.detail || payload.message || payload.error)) || `Failed to mark for review (${res.status})`;
-          throw new Error(msg);
-        }
+        const msg = (payload && (payload.detail || payload.message || payload.error)) || `Failed to mark for review (${res.status})`;
+        throw new Error(msg);
       }
     } catch (e) {
       setError(e?.message || "Failed to mark for review");
@@ -208,7 +185,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
       formData.append("expected_answer", question.expected_answer || question.answer);
       if (sessionId) formData.append("session_id", sessionId);
 
-      // Validate audio blob before proceeding
       if (!audioBlob) {
         console.error('No audio blob available');
         setError('Please record an answer before submitting');
@@ -223,16 +199,10 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         return;
       }
 
-      // Create a file with proper name and type
       const audioFile = new File([audioBlob], `recording_${candidateId}_q${question.id}.webm`, {
         type: 'audio/webm;codecs=opus'
       });
       formData.append("audio_file", audioFile);
-
-      // Log form data for debugging
-      for (let [key, value] of formData.entries()) {
-        console.log(`${key}:`, key === 'audio_file' ? `File(${value.size} bytes, ${value.type})` : value);
-      }
 
       console.log('Sending request to server...');
       const response = await fetch(`${API_BASE}/questions/submit_answer`, {
@@ -257,7 +227,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         throw new Error(responseData.detail || responseData.message || responseData.error || `Server error: ${response.status}`);
       }
 
-      // Success: consider answered on any 200 response so Mark for Review is enabled
       setHasAnswered(true);
       return responseData;
 
@@ -277,16 +246,29 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
   async function handleFinish() {
     setIsSubmitting(true);
     try {
-      // Check if there are marked-for-review questions first
-      const data = await getJSON(`/questions/get_review_questions?candidate_id=${encodeURIComponent(candidateId)}`);
+      const url = `${API_BASE}/questions/get_review_questions?candidate_id=${encodeURIComponent(candidateId)}`;
+      console.log('Fetching review questions from:', url);
+      
+      const response = await fetch(url);
+      const contentType = response.headers.get('content-type') || '';
+      let data;
+      
+      if (contentType.includes('application/json')) {
+        data = await response.json();
+      } else {
+        const text = await response.text();
+        console.warn('Non-JSON response:', text);
+        data = { review_questions: [] };
+      }
+      
       const list = Array.isArray(data?.review_questions) ? data.review_questions : [];
+      console.log('Review questions list:', list);
+      
       if (list.length > 0 && typeof onRequestReview === 'function') {
-        // Hand over to parent to review before final submission
         onRequestReview(list);
         return;
       }
 
-      // No items to review -> finalize
       const params = new URLSearchParams();
       params.append("candidate_id", String(candidateId));
       params.append("candidate_name", String(candidateName));
@@ -297,22 +279,21 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
         body: params.toString(),
       });
 
-      const contentType = res.headers.get('content-type') || '';
-      const payload = contentType.includes('application/json') ? await res.json() : await res.text();
+      const contentType2 = res.headers.get('content-type') || '';
+      const payload = contentType2.includes('application/json') ? await res.json() : await res.text();
       if (!res.ok) {
         const msg = (payload && (payload.detail || payload.message || payload.error)) || `Failed to get result (${res.status})`;
         throw new Error(msg);
       }
       onFinishTest(payload);
     } catch (err) {
+      console.error('Error in handleFinish:', err);
       setError(err.message || "Failed to finish.");
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  // Inline styles (UI only)
-  // Define base button style separately to avoid referencing `styles` before it's initialized
   const btnBase = { padding: '12px 18px', fontSize: 16, fontWeight: 800, borderRadius: 12, color: '#fff', boxShadow: '0 8px 18px rgba(0,0,0,0.25)', border: 'none', cursor: 'pointer', fontFamily: "Inter, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif" };
 
   const styles = {
@@ -403,7 +384,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
     smSpinner: { height: 16, width: 16, border: '2px solid rgba(255,255,255,0.6)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }
   };
 
-  // Determine current status for badge
   const getStatusBadge = () => {
     if (isRecording) return { text: "Recording...", active: true };
     if (isTranscribing) return { text: "Transcribing...", active: true };
@@ -439,7 +419,6 @@ export default function QuestionBox({ question, onNext, candidateId, candidateNa
             <span style={styles.qtext}>{question.question}</span>
           </p>
 
-          {/* Transcript Preview */}
           {isPreviewMode && transcriptPreview && (
             <div style={styles.preview}>
               <div style={styles.previewTitle}>Your Answer Preview:</div>

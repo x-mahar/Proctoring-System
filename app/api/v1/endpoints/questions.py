@@ -1,6 +1,6 @@
 from fastapi import APIRouter, UploadFile, Form, HTTPException, File
 from fastapi.responses import JSONResponse
-from app.utils.stt_handler import speech_to_text
+from app.utils.stt_handler import speech_to_text, transcribe_only
 from app.utils.evaluator import evaluate_answer
 from app.utils.logger import save_result
 from datetime import datetime
@@ -262,19 +262,25 @@ async def get_review_questions(candidate_id: str):
     return {"review_questions": review_questions}
 
 
+
 @router.post("/stt_only")
-async def stt_only(
-    candidate_id: str = Form(...),
-    question_id: int = Form(...),
-    expected_answer: str = Form(...),
-    audio_file: UploadFile = File(...)
-):
+async def stt_only(audio: UploadFile = File(...)):
+    """
+    Transcribe audio for preview only - doesn't store in database
+    """
+    if not audio:
+        raise HTTPException(status_code=400, detail="No audio file provided")
+
     try:
-        # user_answer = await speech_to_text(audio_file)
-        user_answer = await speech_to_text(audio_file, candidate_id, question_id, expected_answer)
-        return {"user_answer": user_answer.strip()}
+        # Only transcribe, don't store in DB
+        from app.utils.stt_handler import transcribe_only
+
+        # Create transcribe_only function or modify existing one
+        transcription = await transcribe_only(audio)
+
+        return {"transcript": transcription.strip()}
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=f"Transcription failed: {str(e)}")
 
 
 @router.post("/check_status")

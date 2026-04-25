@@ -1,460 +1,285 @@
-import { useEffect, useRef, useCallback, useState } from "react";
-import { postJSON, API_BASE } from "../utils/api";
-import useWebcamStream from "../hooks/useWebcamStream.jsx";
-import useHeadPoseDetection from "../hooks/useHeadPoseDetection";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { API_BASE } from "../utils/api";
+
+// How many consecutive detections before firing a violation
+const TRIGGER_THRESHOLD = 2;
 
 export default function WebcamFeed({ candidateId, candidateName, sessionId, onViolation, onDisqualify }) {
-  // Inline styles replacing Tailwind utility classes
-  const styles = {
-    container: { position: 'relative', width: '100%', height: '100%', background: '#000', borderRadius: 8, overflow: 'hidden' },
-    video: { width: '100%', height: '100%', objectFit: 'cover' },
-    panelBase: { width: '100%', height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#111827', color: '#fff', padding: 24, textAlign: 'center', borderRadius: 8 },
-    panelIconWrapError: { background: 'rgba(239,68,68,0.2)', padding: 16, borderRadius: 9999, marginBottom: 16 },
-    title: { fontSize: 18, fontWeight: 600, marginBottom: 8 },
-    textMuted: { color: '#d1d5db', maxWidth: 560, margin: '0 auto 24px' },
-    btn: { padding: '8px 16px', borderRadius: 8, fontWeight: 500, transition: 'background 0.2s', color: '#fff', display: 'inline-flex', alignItems: 'center', border: 'none', cursor: 'pointer' },
-    btnPrimary: { background: '#2563eb' },
-    btnDisabled: { background: '#3b82f6', cursor: 'not-allowed' },
-    loadingRingOuter: { width: 64, height: 64, border: '4px solid rgba(59,130,246,0.2)', borderRadius: '50%', marginBottom: 24, position: 'relative' },
-    loadingRingInner: { position: 'absolute', top: 0, left: 0, width: 64, height: 64, border: '4px solid #3b82f6', borderTopColor: 'transparent', borderRadius: '50%' },
-    loadingIcon: { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', color: '#60a5fa' },
-    overlayInfo: { position: 'absolute', bottom: 16, left: 16, background: 'rgba(0,0,0,0.7)', color: '#fff', padding: 8, borderRadius: 6, fontSize: 14 },
-    violationText: { color: '#f87171', fontWeight: 600, marginTop: 4 },
-    processingBadge: { position: 'absolute', top: 16, right: 16, background: 'rgba(0,0,0,0.7)', color: '#fff', padding: '6px 12px', borderRadius: 9999, fontSize: 12, display: 'flex', alignItems: 'center' },
-    processingDot: { width: 10, height: 10, borderRadius: '50%', background: '#3b82f6', marginRight: 8 },
-    icon: { width: 20, height: 20, marginRight: 8 },
-  };
-  const { 
-    videoRef, 
-    isStreaming, 
-    error, 
-    permissionDenied, 
-    deviceError,
-    startWebcam 
-  } = useWebcamStream();
-  
+  const videoRef = useRef(null);
   const canvasRef = useRef(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [error, setError] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [lastError, setLastError] = useState(null);
-  const [systemStatus, setSystemStatus] = useState(null);
-  const [headPoseData, setHeadPoseData] = useState(null);
-  const { detectHeadPose, checkSystemStatus } = useHeadPoseDetection();
 
-  // Check system status on component mount
+  // Use refs for values used inside intervals to avoid stale closures
+  const violationCountRef = useRef(0);
+  const [violationCountDisplay, setViolationCountDisplay] = useState(0);
+
+  // Consecutive detection counters per violation type (for debouncing)
+  const consecutiveRef = useRef({
+    head_pose: 0,
+    multiple_people: 0,
+    face_not_detected: 0,
+  });
+
+  // Last shown status for the overlay badge
+  const [statusBadge, setStatusBadge] = useState(null); // { type, message }
+
+  // ── Start webcam ──
   useEffect(() => {
-    const initialize = async () => {
+    async function startWebcam() {
       try {
-        const response = await fetch(`${API_BASE}/status/`);
-        
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        // Try to parse as JSON, but handle non-JSON responses gracefully
-        try {
-          const status = await response.json();
-          setSystemStatus(status);
-        } catch (jsonError) {
-          console.warn('Received non-JSON response from status endpoint');
-          setSystemStatus({ status: 'unknown', message: 'Status check completed' });
-        }
-      } catch (error) {
-        console.error('Failed to check system status:', error);
-        // Set a default status instead of showing an error
-        setSystemStatus({ 
-          status: 'error', 
-          message: 'Proctoring service status unknown' 
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480, facingMode: "user" }
         });
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          setIsStreaming(true);
+        }
+      } catch (err) {
+        setError(err.message);
+      }
+    }
+    startWebcam();
+    return () => {
+      if (videoRef.current?.srcObject) {
+        videoRef.current.srcObject.getTracks().forEach(t => t.stop());
       }
     };
-    
-    initialize();
   }, []);
 
-  // Retry when error
-  const renderError = () => {
-    let errorMessage = lastError || error;
-    let title = "Webcam Error";
-    
-    if (permissionDenied) {
-      title = "Camera Access Required";
-      errorMessage = "Please allow camera access in your browser settings and click Retry.";
-    } else if (deviceError) {
-      title = "Camera Not Found";
-      errorMessage = "No camera device was detected. Please connect a camera and try again.";
-    }
-    
-    return (
-      <div style={styles.panelBase}>
-        <div style={styles.panelIconWrapError}>
-          <svg style={{ width: 40, height: 40 }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-        </div>
-        <h3 style={styles.title}>{title}</h3>
-        <p style={styles.textMuted}>{errorMessage}</p>
-        <button onClick={startWebcam} style={{ ...styles.btn, ...(isProcessing ? styles.btnDisabled : styles.btnPrimary) }} disabled={isProcessing}>
-          {!isProcessing ? (
-            <>
-              <svg style={styles.icon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-              </svg>
-              Try Again
-            </>
-          ) : (
-            <>Starting...</>
-          )}
-        </button>
-      </div>
-    );
+  const dataURLtoBlob = (dataurl) => {
+    const arr = dataurl.split(",");
+    const mime = arr[0].match(/:(.*?);/)[1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) u8arr[n] = bstr.charCodeAt(n);
+    return new Blob([u8arr], { type: mime });
   };
 
-  const renderLoading = () => (
-    <div style={styles.panelBase}>
-      <div style={{ position: 'relative', marginBottom: 24 }}>
-        <div style={styles.loadingRingOuter}></div>
-        <div style={styles.loadingRingInner}></div>
-        <div style={styles.loadingIcon}>
-          <svg style={{ width: 32, height: 32, color: '#60a5fa' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-          </svg>
-        </div>
-      </div>
-      <h3 style={{ fontSize: 18, fontWeight: 600, marginBottom: 8 }}>Initializing Camera</h3>
-      <p style={{ color: '#9ca3af', maxWidth: 560 }}>
-        Please wait while we set up your camera. Make sure to allow camera access when prompted.
-      </p>
-    </div>
-  );
+  const fireViolation = useCallback((message, isBan = false) => {
+    if (isBan) {
+      onDisqualify?.(message);
+      return;
+    }
+    violationCountRef.current += 1;
+    setViolationCountDisplay(violationCountRef.current);
+    onViolation?.(message);
+  }, [onViolation, onDisqualify]);
 
-  // Track frame timing and state
-  const frameInterval = useRef(null);
-  const lastProcessedTime = useRef(0);
-  const frameId = useRef(0);
-  const processingRef = useRef(false);
-  const frameQueue = useRef([]);
-  const isMounted = useRef(true);
-  const isDisqualifiedRef = useRef(false);
-
-  // Cleanup on unmount
+  // ── Send frame every 4 seconds (slightly slower = less sensitive) ──
   useEffect(() => {
-    return () => {
-      isMounted.current = false;
-      if (frameInterval.current) {
-        clearInterval(frameInterval.current);
-      }
-    };
-  }, []);
+    if (!isStreaming) return;
 
-  // Process the next frame in the queue
-  const processNextFrame = useCallback(() => {
-    if (frameQueue.current.length === 0 || processingRef.current || isDisqualifiedRef.current) {
-      return;
-    }
+    const interval = setInterval(async () => {
+      if (!videoRef.current || isProcessing) return;
 
-    const { frame, id, timestamp } = frameQueue.current.shift();
-    
-    // Skip if this frame is no longer relevant
-    if (id !== frameId.current) {
-      return;
-    }
-
-    processingRef.current = true;
-    
-    const processFrame = async () => {
-      const image = frame;
-      const currentTimestamp = Date.now();
-      
-      // Ensure we have a valid candidate ID and frame
-      if (!candidateId || !image || isDisqualifiedRef.current) {
-        processingRef.current = false;
-        return;
-      }
-
-      try {
-        const poseResponse = await detectHeadPose(image, candidateName, sessionId);
-        // Normalize pose response
-        let normalized = {};
-        if (typeof poseResponse === 'string') {
-          normalized = { message: poseResponse };
-        } else if (poseResponse && typeof poseResponse === 'object') {
-          normalized = poseResponse;
-        }
-
-        if (isMounted.current) {
-          setHeadPoseData(prev => ({
-            ...normalized,
-            timestamp: currentTimestamp
-          }));
-
-          // Handle violations from head pose detection using multiple possible flags/fields
-          const isViolation = !!(normalized.violation || normalized.bad_pose || normalized.alert || normalized.status === 'violation');
-          if (isViolation) {
-            const msg = normalized.message || normalized.warning || normalized.reason || 'Suspicious head movement detected';
-            onViolation?.(msg);
-          }
-
-          // Handle disqualification/banned directly from frames response
-          if (normalized?.status === 'banned' || normalized?.disqualified === true) {
-            isDisqualifiedRef.current = true;
-            if (frameInterval.current) {
-              clearInterval(frameInterval.current);
-              frameInterval.current = null;
-            }
-            onDisqualify?.(normalized?.message || normalized?.warning || 'Test terminated due to policy violation');
-          }
-        }
-      } catch (error) {
-        console.error('Error in frame processing:', error);
-      } finally {
-        processingRef.current = false;
-        
-        // Process next frame in the queue if available
-        if (frameQueue.current.length > 0 && !isDisqualifiedRef.current) {
-          processNextFrame();
-        }
-      }
-    };
-    
-    // Start processing the frame
-    processFrame();
-  }, [candidateId, candidateName, sessionId, onViolation]);
-
-  // Capture and queue frames at a controlled rate
-  const captureAndQueueFrame = useCallback(() => {
-    if (!videoRef.current || !isMounted.current || isDisqualifiedRef.current) {
-      return;
-    }
-
-    const now = Date.now();
-    
-    // Limit frame processing to ~10fps to reduce load
-    if (now - lastProcessedTime.current < 100) { // 100ms = ~10fps
-      return;
-    }
-    
-    lastProcessedTime.current = now;
-    const currentFrameId = ++frameId.current;
-    
-    // Skip if we have too many frames in the queue
-    if (frameQueue.current.length >= 2) {
-      return;
-    }
-    
-    try {
-      // Create canvas if it doesn't exist
-      if (!canvasRef.current) {
-        canvasRef.current = document.createElement('canvas');
-      }
-      
-      const video = videoRef.current;
-      // Ensure metadata loaded before reading dimensions
-      if (video.readyState < 2) {
-        return;
-      }
-      
-      // Ensure video has valid dimensions
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        console.warn('Video dimensions are zero, skipping frame capture');
-        return;
-      }
-      
-      // Set canvas dimensions to match video
-      canvasRef.current.width = video.videoWidth;
-      canvasRef.current.height = video.videoHeight;
-      
-      const context = canvasRef.current.getContext('2d', { willReadFrequently: true });
-      
-      // Draw the current video frame to the canvas
-      try {
-        context.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
-      } catch (drawError) {
-        console.error('Error drawing video frame:', drawError);
-        return;
-      }
-      
-      // Convert to JPEG with 70% quality to reduce size while maintaining quality
-      let image;
-      try {
-        image = canvasRef.current.toDataURL('image/jpeg', 0.7);
-      } catch (encodeError) {
-        console.error('Error encoding image:', encodeError);
-        return;
-      }
-      
-      // Add frame to queue for processing
-      frameQueue.current.push({
-        frame: image,
-        id: currentFrameId,
-        timestamp: now
-      });
-      
-      // Start processing if not already in progress
-      if (!processingRef.current && !isDisqualifiedRef.current) {
-        processNextFrame();
-      }
-    } catch (error) {
-      console.error('Error in frame capture:', error);
-    }
-    
-    // Skip if we have too many frames in the queue
-    if (frameQueue.current.length >= 2) {
-      return;
-    }
-    
-    try {
       setIsProcessing(true);
-      
-      // Create canvas if it doesn't exist
-      if (!canvasRef.current) {
-        canvasRef.current = document.createElement("canvas");
-      }
-      
-      const video = videoRef.current;
-      // Ensure metadata loaded before reading dimensions
-      if (video.readyState < 2) {
-        return;
-      }
-      
-      // Ensure video has valid dimensions
-      if (video.videoWidth === 0 || video.videoHeight === 0) {
-        console.warn("Video dimensions are zero, skipping frame capture");
-        return;
-      }
-      
-      canvasRef.current.width = video.videoWidth;
-      canvasRef.current.height = video.videoHeight;
-      
-      const context = canvasRef.current.getContext("2d", { willReadFrequently: true });
-      
-      // Draw the current video frame to the canvas
       try {
-        context.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
-      } catch (drawError) {
-        console.error("Error drawing video frame:", drawError);
-        return;
-      }
-      
-      // Skip processing if this is not the most recent frame
-      if (currentFrameId !== frameId.current) {
-        return;
-      }
-      
-      // Convert to JPEG with 70% quality to reduce size while maintaining quality
-      let image;
-      try {
-        image = canvasRef.current.toDataURL("image/jpeg", 0.7);
-      } catch (encodeError) {
-        console.error("Error encoding image:", encodeError);
-        return;
-      }
+        if (!canvasRef.current) canvasRef.current = document.createElement("canvas");
+        const video = videoRef.current;
+        canvasRef.current.width = video.videoWidth;
+        canvasRef.current.height = video.videoHeight;
+        const ctx = canvasRef.current.getContext("2d");
+        ctx.drawImage(video, 0, 0);
+        const imageData = canvasRef.current.toDataURL("image/jpeg", 0.8);
 
-      // Process frame in the queue
-      frameQueue.current.push({
-        frame: image,
-        id: currentFrameId,
-        timestamp: Date.now()
-      });
-      
-      // If not already processing, start processing the queue
-      if (!processingRef.current && !isDisqualifiedRef.current) {
-        processNextFrame();
-      }
+        const formData = new FormData();
+        formData.append("file", dataURLtoBlob(imageData), "frame.jpg");
+        formData.append("candidate_name", candidateName || "unknown");
+        formData.append("session_id", sessionId || "unknown");
 
-      // Send frame to server in the background for phone detection and ban handling
-      postJSON("/frames/", { 
-        candidate_id: candidateId, 
-        image
-      })
-      .then(response => {
-        try { console.debug('frames/ response:', response); } catch {}
+        const response = await fetch(`${API_BASE}/frames/`, {
+          method: "POST",
+          body: formData,
+        });
 
-        // If backend returns a plain string, surface it as a warning
-        if (typeof response === 'string' && response.trim().length > 0) {
-          onViolation?.(response);
+        if (!response.ok) return;
+        const result = await response.json();
+
+        console.log("[WebcamFeed] Detection result:", result);
+
+        // ── Handle banned / disqualified from backend ──
+        if (result.status === "banned") {
+          setStatusBadge({ type: "banned", message: result.message });
+          fireViolation(result.message, true); // true = disqualify
           return;
         }
 
-        // Normalize potential cheating indicators
-        const cheatingFlag = !!(response?.cheating || response?.is_cheating || response?.violation || response?.alert);
-        if (cheatingFlag) {
-          const msg = response?.warning || response?.message || response?.reason || 'Cheating behavior detected';
-          onViolation?.(msg);
+        // ── Handle paused state ──
+        if (result.status === "paused") {
+          setStatusBadge({ type: "paused", message: `Paused: ${result.remaining_seconds}s` });
+          return;
         }
-        
-        // Disqualification handling (support different shapes)
-        if (response?.status === "banned" || response?.disqualified === true) {
-          // Stop further processing and notify parent
-          isDisqualifiedRef.current = true;
-          if (frameInterval.current) {
-            clearInterval(frameInterval.current);
-            frameInterval.current = null;
-          }
-          onDisqualify?.(response?.message || response?.warning || 'Test terminated due to policy violation');
-        }
-      })
-      .catch(error => {
-        console.warn("Failed to send frame to server:", error);
-        setLastError("Failed to send frame to server. Please check your connection.");
-      });
-    } catch (error) {
-      console.error("Error capturing frame:", error);
-      setLastError("Error capturing webcam frame");
-      setIsProcessing(false);
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [candidateId, onViolation, isProcessing, detectHeadPose]);
 
-  // Set up frame capture when streaming starts/stops
-  useEffect(() => {
-    if (!isStreaming) {
-      if (frameInterval.current) {
-        clearInterval(frameInterval.current);
-        frameInterval.current = null;
+        // ── Phone detected (comes back as cheating: true, reason: "Mobile phone detected") ──
+        if (result.cheating && result.reason?.toLowerCase().includes("mobile")) {
+          setStatusBadge({ type: "phone", message: "📱 Phone detected!" });
+          fireViolation("Phone detected in frame!", true); // instant ban
+          return;
+        }
+
+        // ── Multiple people ──
+        if (result.cheating && result.reason?.toLowerCase().includes("multiple people")) {
+          consecutiveRef.current.multiple_people += 1;
+          if (consecutiveRef.current.multiple_people >= TRIGGER_THRESHOLD) {
+            consecutiveRef.current.multiple_people = 0;
+            setStatusBadge({ type: "multiple", message: "👥 Multiple people detected" });
+            fireViolation("Multiple people detected in frame!");
+          } else {
+            setStatusBadge({ type: "warning", message: `Multiple people (${consecutiveRef.current.multiple_people}/${TRIGGER_THRESHOLD})` });
+          }
+          return;
+        } else {
+          consecutiveRef.current.multiple_people = 0;
+        }
+
+        // ── Head pose / looking away ──
+        if (result.cheating && result.reason && !result.reason.toLowerCase().includes("mobile")) {
+          consecutiveRef.current.head_pose += 1;
+          if (consecutiveRef.current.head_pose >= TRIGGER_THRESHOLD) {
+            consecutiveRef.current.head_pose = 0;
+            setStatusBadge({ type: "pose", message: `👀 ${result.reason}` });
+            fireViolation(result.reason || "Head movement detected!");
+          } else {
+            setStatusBadge({ type: "warning", message: `Head pose (${consecutiveRef.current.head_pose}/${TRIGGER_THRESHOLD})` });
+          }
+          return;
+        } else {
+          consecutiveRef.current.head_pose = 0;
+        }
+
+        // ── Face not detected (warning only, not a hard violation unless repeated) ──
+        if (result.warning && result.reason?.toLowerCase().includes("face")) {
+          consecutiveRef.current.face_not_detected += 1;
+          if (consecutiveRef.current.face_not_detected >= 4) {
+            consecutiveRef.current.face_not_detected = 0;
+            setStatusBadge({ type: "face", message: "🙈 Face not visible" });
+            fireViolation("Face not visible for extended period!");
+          } else {
+            setStatusBadge({ type: "warning", message: "Face not clearly visible" });
+          }
+          return;
+        } else {
+          consecutiveRef.current.face_not_detected = 0;
+        }
+
+        // ── All clear ──
+        setStatusBadge(null);
+
+      } catch (err) {
+        console.error("[WebcamFeed] Detection error:", err);
+      } finally {
+        setIsProcessing(false);
       }
-      return;
-    }
-    
-    // Start frame capture at ~10fps
-    frameInterval.current = setInterval(() => {
-      captureAndQueueFrame();
-    }, 100); // Check for new frames every 100ms
-    
-    // Initial frame capture
-    captureAndQueueFrame();
-    
-    return () => {
-      if (frameInterval.current) {
-        clearInterval(frameInterval.current);
-        frameInterval.current = null;
-      }
-    };
-  }, [isStreaming, captureAndQueueFrame]);
+    }, 4000); // 4 seconds between frames
+
+    return () => clearInterval(interval);
+  }, [isStreaming, candidateName, sessionId, fireViolation, isProcessing]);
+
+  // Badge color map
+  const badgeColors = {
+    banned:   "rgba(220,38,38,0.95)",
+    paused:   "rgba(234,179,8,0.9)",
+    phone:    "rgba(220,38,38,0.95)",
+    multiple: "rgba(239,68,68,0.9)",
+    pose:     "rgba(234,179,8,0.85)",
+    face:     "rgba(234,179,8,0.85)",
+    warning:  "rgba(107,114,128,0.8)",
+  };
+
+  if (error) {
+    return (
+      <div style={{ color: "#f87171", padding: 16, textAlign: "center", fontSize: 13 }}>
+        📷 Webcam Error: {error}
+      </div>
+    );
+  }
 
   return (
-    <div style={styles.container}>
-      {!isStreaming && !error && renderLoading()}
-      {error && renderError()}
-      <video ref={videoRef} autoPlay playsInline muted style={styles.video} />
-      {headPoseData && (
-        <div style={styles.overlayInfo}>
-          <div>Pitch: {headPoseData.pitch?.toFixed(2) || 'N/A'}°</div>
-          <div>Yaw: {headPoseData.yaw?.toFixed(2) || 'N/A'}°</div>
-          <div>Roll: {headPoseData.roll?.toFixed(2) || 'N/A'}°</div>
-          {headPoseData.violation && (
-            <div style={styles.violationText}>
-              {headPoseData.message || 'Suspicious movement detected'}
-            </div>
-          )}
-        </div>
-      )}
+    <div style={{
+      width: "100%",
+      height: "100%",
+      background: "#000",
+      position: "relative",
+      overflow: "hidden",
+    }}>
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted
+        style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+      />
+
+      {/* Analyzing indicator */}
       {isProcessing && (
-        <div style={styles.processingBadge}>
-          <div style={styles.processingDot}></div>
-          Analyzing...
+        <div style={{
+          position: "absolute",
+          top: 6,
+          left: 6,
+          background: "rgba(0,0,0,0.6)",
+          color: "rgba(255,255,255,0.7)",
+          fontSize: 10,
+          padding: "2px 7px",
+          borderRadius: 4,
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+        }}>
+          <span style={{
+            width: 5, height: 5, borderRadius: "50%",
+            background: "#60a5fa",
+            display: "inline-block",
+            animation: "pulse 1s infinite",
+          }} />
+          Analyzing
         </div>
       )}
+
+      {/* Violation status badge */}
+      {statusBadge && (
+        <div style={{
+          position: "absolute",
+          bottom: 6,
+          left: 6,
+          right: 6,
+          background: badgeColors[statusBadge.type] || "rgba(0,0,0,0.7)",
+          color: "#fff",
+          fontSize: 11,
+          fontWeight: 600,
+          padding: "4px 8px",
+          borderRadius: 5,
+          textAlign: "center",
+        }}>
+          {statusBadge.message}
+        </div>
+      )}
+
+      {/* Violation count */}
+      {violationCountDisplay > 0 && (
+        <div style={{
+          position: "absolute",
+          top: 6,
+          right: 6,
+          background: "rgba(220,38,38,0.85)",
+          color: "#fff",
+          fontSize: 10,
+          fontWeight: 700,
+          padding: "2px 7px",
+          borderRadius: 4,
+        }}>
+          ⚠️ {violationCountDisplay} violation{violationCountDisplay > 1 ? "s" : ""}
+        </div>
+      )}
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
+        }
+      `}</style>
     </div>
   );
 }

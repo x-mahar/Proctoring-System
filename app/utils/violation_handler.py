@@ -1,5 +1,3 @@
-# app/utils/violation_handler.py
-
 from datetime import datetime
 from pymongo.errors import PyMongoError
 from app.db.session import db
