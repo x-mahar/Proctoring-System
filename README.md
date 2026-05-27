@@ -125,6 +125,6 @@ Add AWS credentials to .env
 Use boto3 to upload videos from backend
 
 👨‍💻 Contributors
-Developer: Nitin
+Developer: Nitin , Krishna
 
 Institution: Ganga institute of technology and management
